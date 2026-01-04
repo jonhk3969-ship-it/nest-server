@@ -6,23 +6,28 @@ export class SystemService implements OnModuleInit {
     constructor(private prisma: PrismaService) { }
 
     async onModuleInit() {
-        // Ensure at least one config document exists using raw command
-        const configs: any = await this.prisma.$runCommandRaw({
-            find: 'SystemConfig',
-            filter: {},
-            limit: 1
-        });
-
-        const firstBatch = configs?.cursor?.firstBatch || [];
-
-        if (firstBatch.length === 0) {
-            await this.prisma.$runCommandRaw({
-                insert: 'SystemConfig',
-                documents: [{
-                    isMaintenanceMode: false,
-                    updatedAt: { $date: new Date().toISOString() }
-                }]
+        try {
+            // Ensure at least one config document exists using raw command
+            const configs: any = await this.prisma.$runCommandRaw({
+                find: 'SystemConfig',
+                filter: {},
+                limit: 1
             });
+
+            const firstBatch = configs?.cursor?.firstBatch || [];
+
+            if (firstBatch.length === 0) {
+                await this.prisma.$runCommandRaw({
+                    insert: 'SystemConfig',
+                    documents: [{
+                        isMaintenanceMode: false,
+                        updatedAt: { $date: new Date().toISOString() }
+                    }]
+                });
+            }
+        } catch (error) {
+            console.error('Failed to initialize SystemService. Check database connection and credentials.');
+            console.error(error);
         }
     }
 
