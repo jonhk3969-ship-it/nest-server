@@ -14,7 +14,9 @@ async function bootstrap() {
   app.enableCors({
     origin: [
       // 'http://localhost:3000',
+
       'http://localhost:5173',
+      'https://demo-fe.online',
       // 'https://your-production-domain.com', // TODO: Add production domain
     ],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
