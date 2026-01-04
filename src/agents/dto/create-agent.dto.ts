@@ -1,0 +1,24 @@
+import { IsString, IsNotEmpty, IsOptional, IsNumber } from 'class-validator';
+
+export class CreateAgentDto {
+    @IsString()
+    @IsNotEmpty()
+    username: string;
+
+    @IsString()
+    @IsOptional()
+    password?: string;
+
+    @IsString()
+    @IsOptional()
+    nickName?: string;
+
+    @IsNumber()
+    @IsNumber()
+    @IsOptional()
+    percent?: number;
+
+    @IsNumber()
+    @IsOptional()
+    maxNumUser?: number;
+}

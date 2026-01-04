@@ -1,0 +1,40 @@
+# compiled output
+/dist
+/node_modules
+
+# logs
+yarn-debug.log*
+yarn-error.log*
+npm-debug.log*
+pnpm-debug.log*
+
+# environment variables
+.env
+.env.production
+.env.test
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# testing
+/coverage
+
+# Prisma
+/prisma/*.db
+/prisma/*.db-journal
+/generated/prisma
+
+# OS metadata
+.DS_Store
+Thumbs.db
