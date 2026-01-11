@@ -14,6 +14,10 @@ import { PrismaModule } from './prisma/prisma.module';
 import { SystemModule } from './system/system.module';
 import { MaintenanceGuard } from './common/guards/maintenance.guard';
 import { PostsModule } from './posts/posts.module';
+import { GamesModule } from './games/games.module';
+import { SeamlessModule } from './seamless/seamless.module';
+import { ProvidersModule } from './providers/providers.module';
+import { BannersModule } from './banners/banners.module';
 
 @Module({
   imports: [
@@ -30,6 +34,10 @@ import { PostsModule } from './posts/posts.module';
     PrismaModule,
     SystemModule,
     PostsModule,
+    GamesModule,
+    SeamlessModule,
+    ProvidersModule,
+    BannersModule,
   ],
   controllers: [AppController],
   providers: [

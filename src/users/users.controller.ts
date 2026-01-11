@@ -55,18 +55,7 @@ export class UsersController {
     }
 
 
-    @Roles('agent', 'user', 'admin')
-    @Get(':id')
-    async findOne(@Param('id') id: string, @Req() req) {
-        const userResp = await this.usersService.findOne(id);
-        const user = userResp.data;
-        if (!user) return null;
 
-        if (req.user.role === 'user' && req.user.userId !== id) throw new UnauthorizedException();
-        if (req.user.role === 'agent' && user.agentId !== req.user.userId) throw new UnauthorizedException();
-
-        return userResp;
-    }
 
     @Roles('agent')
     @Patch(':id')
@@ -120,6 +109,12 @@ export class UsersController {
         return this.usersService.getFinancialStats(req.user.userId, startDate, endDate);
     }
 
+    @Roles('agent', 'user', 'admin')
+    @Get('amount')
+    getAmount(@Req() req) {
+        return this.usersService.getAmount(req.user.userId);
+    }
+
     @Roles('admin', 'agent', 'user')
     @Get(':id/history')
     async getHistory(
@@ -149,5 +144,18 @@ export class UsersController {
     @Post('unblock')
     unblock(@Body('userIds') userIds: string[], @Req() req) {
         return this.usersService.unblockUsers(req.user.userId, userIds);
+    }
+
+    @Roles('agent', 'user', 'admin')
+    @Get(':id')
+    async findOne(@Param('id') id: string, @Req() req) {
+        const userResp = await this.usersService.findOne(id);
+        const user = userResp.data;
+        if (!user) return null;
+
+        if (req.user.role === 'user' && req.user.userId !== id) throw new UnauthorizedException();
+        if (req.user.role === 'agent' && user.agentId !== req.user.userId) throw new UnauthorizedException();
+
+        return userResp;
     }
 }

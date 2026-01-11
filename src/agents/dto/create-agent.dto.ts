@@ -13,6 +13,10 @@ export class CreateAgentDto {
     @IsOptional()
     nickName?: string;
 
+    @IsString()
+    @IsOptional()
+    agentname?: string;
+
     @IsNumber()
     @IsNumber()
     @IsOptional()

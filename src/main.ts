@@ -16,8 +16,11 @@ async function bootstrap() {
       // 'http://localhost:3000',
 
       'http://localhost:5173',
+      'http://localhost:5174',
       'https://demo-fe.online',
+      'https://goldspin888.com',
       'https://www.demo-fe.online',
+      'https://www.goldspin888.com',
       // 'https://your-production-domain.com', // TODO: Add production domain
     ],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',

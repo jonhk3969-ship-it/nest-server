@@ -10,13 +10,21 @@ export class AgentsService {
 
     async create(createAgentDto: CreateAgentDto) {
         // Check if agent exists
-        const existing = await this.prisma.agent.findUnique({ where: { username: createAgentDto.username } });
-        if (existing) throw new BadRequestException('Agent already exists');
+        const existing = await this.prisma.agent.findFirst({
+            where: {
+                OR: [
+                    { username: createAgentDto.username },
+                    { agentname: createAgentDto.agentname },
+                    { nickName: createAgentDto.nickName }
+                ]
+            }
+        });
+        if (existing) throw new BadRequestException('Agent ມີແລ້ວ');
 
         let password = createAgentDto.password;
         if (!password) {
             // Generate random password: 4 letters + 4 numbers
-            const chars = 'abcdefghijklmnopqrstuvwxyz';
+            const chars = 'abcdefghijklmnopqrstuvwxyz@#$%*';
             const nums = '0123456789';
             let randomChars = '';
             let randomNums = '';
@@ -46,6 +54,10 @@ export class AgentsService {
             doc.nickName = createAgentDto.nickName;
         }
 
+        if (createAgentDto.agentname) {
+            doc.agentname = createAgentDto.agentname;
+        }
+
         try {
             await this.prisma.$runCommandRaw({
                 insert: 'Agent',
@@ -59,6 +71,7 @@ export class AgentsService {
                     id: true,
                     username: true,
                     nickName: true,
+                    agentname: true,
                     amount: true,
                     role: true,
                     percent: true,
@@ -87,6 +100,7 @@ export class AgentsService {
                     id: true,
                     username: true,
                     nickName: true,
+                    agentname: true,
                     amount: true,
                     role: true,
                     percent: true,
@@ -118,6 +132,7 @@ export class AgentsService {
                 id: true,
                 username: true,
                 nickName: true,
+                agentname: true,
                 amount: true,
                 role: true,
                 percent: true,
@@ -170,7 +185,25 @@ export class AgentsService {
         }
         const agent = await this.findOne(id);
         if (!agent) throw new BadRequestException('Agent not found');
-        // Use runCommandRaw to bypass P2031 (Transaction requirement) on standalone MongoDB
+        // 1. Delete UserHistory (User-Agent transactions)
+        await this.prisma.$runCommandRaw({
+            delete: 'UserHistory',
+            deletes: [{ q: { agentId: { $oid: id } }, limit: 0 }]
+        });
+
+        // 2. Delete AgentHistory (Agent-Admin transactions)
+        await this.prisma.$runCommandRaw({
+            delete: 'AgentHistory',
+            deletes: [{ q: { agentId: { $oid: id } }, limit: 0 }]
+        });
+
+        // 3. Delete Users
+        await this.prisma.$runCommandRaw({
+            delete: 'User',
+            deletes: [{ q: { agentId: { $oid: id } }, limit: 0 }]
+        });
+
+        // 4. Delete Agent
         const result = await this.prisma.$runCommandRaw({
             delete: 'Agent',
             deletes: [
@@ -426,7 +459,7 @@ export class AgentsService {
         });
 
         const agents = await this.prisma.agent.findMany({
-            select: { id: true, nickName: true, percent: true }
+            select: { id: true, nickName: true, agentname: true, percent: true }
         });
         const agentMap = new Map(agents.map(a => [a.id, a]));
 
@@ -442,6 +475,7 @@ export class AgentsService {
         const agentStatsMap = new Map<string, {
             agentId: string,
             nickName: string,
+            agentname: string,
             percent: number,
             transactions: number,
             deposit: number,
@@ -455,6 +489,7 @@ export class AgentsService {
             agentStatsMap.set(agent.id, {
                 agentId: agent.id,
                 nickName: agent.nickName || 'Unknown',
+                agentname: agent.agentname || '',
                 percent: agent.percent || 0,
                 transactions: 0,
                 deposit: 0,

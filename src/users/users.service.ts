@@ -65,7 +65,7 @@ export class UsersService {
         const timestamp = new Date().toISOString();
 
         for (let i = 0; i < quantity; i++) {
-            const username = `${agent.nickName}${currentSeq}`;
+            const username = `${agent.nickName}${String(currentSeq).padStart(4, '0')}`;
             currentSeq++;
 
             // Generate 5-digit random password
@@ -105,14 +105,14 @@ export class UsersService {
                 showpassword: true,
                 amount: true,
                 spin: true,
-                role: true,
                 agentId: true,
                 status: true,
                 isOnline: true,
                 ip: true,
                 createdAt: true,
                 updatedAt: true,
-            }
+            },
+            orderBy: { username: 'asc' }
         });
     }
 
@@ -146,7 +146,6 @@ export class UsersService {
                     showpassword: true,
                     amount: true,
                     spin: true,
-                    role: true,
                     agentId: true,
                     status: true,
                     isOnline: true,
@@ -154,7 +153,7 @@ export class UsersService {
                     createdAt: true,
                     updatedAt: true,
                 },
-                orderBy: { createdAt: 'desc' }
+                orderBy: { username: 'asc' }
             }),
             this.prisma.user.count({ where })
         ]);
@@ -188,7 +187,6 @@ export class UsersService {
                     showpassword: true,
                     amount: true,
                     spin: true,
-                    role: true,
                     agentId: true,
                     status: true,
                     isOnline: true,
@@ -196,7 +194,7 @@ export class UsersService {
                     createdAt: true,
                     updatedAt: true,
                 },
-                orderBy: { createdAt: 'desc' }
+                orderBy: { username: 'asc' }
             }),
             this.prisma.user.count({ where })
         ]);
@@ -230,6 +228,22 @@ export class UsersService {
         return {
             status: 'ok',
             data: user
+        };
+    }
+
+    async getAmount(userId: string) {
+        const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { amount: true }
+        });
+
+        if (!user) {
+            throw new BadRequestException('User not found');
+        }
+
+        return {
+            status: 'ok',
+            data: { amount: user.amount }
         };
     }
 
@@ -286,22 +300,22 @@ export class UsersService {
 
         const timestamp = new Date().toISOString();
         let totalRefund = 0;
-        const historyDeletes: any[] = [];
-        const userDeleteQueries: any[] = [];
+        const userUpdates: any[] = [];
 
         for (const user of users) {
             totalRefund += user.amount;
 
-            // Prepare UserHistory Delete Query (Delete all history for this user)
-            historyDeletes.push({
-                q: { userId: { $oid: user.id } },
-                limit: 0 // 0 means delete all matching documents
-            });
-
-            // Prepare User Delete Query
-            userDeleteQueries.push({
+            // Prepare User Soft Delete (Update)
+            userUpdates.push({
                 q: { _id: { $oid: user.id } },
-                limit: 1
+                u: {
+                    $set: {
+                        delete: true,        // Mark as deleted
+                        status: false,       // Disable login
+                        amount: 0.0,         // Clear balance
+                        updatedAt: { $date: timestamp }
+                    }
+                }
             });
         }
 
@@ -318,23 +332,15 @@ export class UsersService {
             });
         }
 
-        // 2. Delete UserHistory
-        if (historyDeletes.length > 0) {
-            await this.prisma.$runCommandRaw({
-                delete: 'UserHistory',
-                deletes: historyDeletes
-            });
-        }
-
-        // 3. Delete Users
-        const result: any = await this.prisma.$runCommandRaw({
-            delete: 'User',
-            deletes: userDeleteQueries
+        // 2. Soft Delete Users (Update instead of Delete)
+        await this.prisma.$runCommandRaw({
+            update: 'User',
+            updates: userUpdates
         });
 
         return {
             status: 'ok',
-            message: `ລົບຜູ້ໃຊ້ ${users.length} ຄົນ ແລະ ປະຫວັດສຳເລັດ`,
+            message: `ລົບຜູ້ໃຊ້ ${users.length} ຄົນສຳເລັດ`,
             data: {
                 deletedCount: users.length,
                 totalRefund
@@ -616,16 +622,20 @@ export class UsersService {
         }
 
         // 6. Update Users
-        await this.prisma.$runCommandRaw({
-            update: 'User',
-            updates: userUpdates
-        });
+        if (userUpdates.length > 0) {
+            await this.prisma.$runCommandRaw({
+                update: 'User',
+                updates: userUpdates
+            });
+        }
 
         // 7. Insert History
-        await this.prisma.$runCommandRaw({
-            insert: 'UserHistory',
-            documents: historyInserts
-        });
+        if (historyInserts.length > 0) {
+            await this.prisma.$runCommandRaw({
+                insert: 'UserHistory',
+                documents: historyInserts
+            });
+        }
 
         return {
             status: 'ok',
@@ -849,16 +859,22 @@ export class UsersService {
             end.setHours(23, 59, 59, 999);
         }
 
-        const history = await this.prisma.userHistory.findMany({
-            where: {
-                agentId: agentId,
-                date: {
-                    gte: start,
-                    lte: end
-                }
-            },
-            select: { amount: true, type: true, date: true }
-        });
+        const [history, agent] = await Promise.all([
+            this.prisma.userHistory.findMany({
+                where: {
+                    agentId: agentId,
+                    date: {
+                        gte: start,
+                        lte: end
+                    }
+                },
+                select: { amount: true, type: true, date: true }
+            }),
+            this.prisma.agent.findUnique({
+                where: { id: agentId },
+                select: { percent: true }
+            })
+        ]);
 
         let totalDeposit = 0;
         let totalWithdraw = 0;
@@ -904,6 +920,9 @@ export class UsersService {
         }
 
         const totalIncome = totalDeposit - totalWithdraw;
+        const percent = agent?.percent || 0;
+        const agentIncome = totalIncome * (percent / 100);
+        const providerIncome = totalIncome - agentIncome;
 
         // Convert Map to sorted array
         // const chart = Array.from(dailyStats.values()).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
@@ -913,7 +932,9 @@ export class UsersService {
                 transactions: totalTransactions,
                 deposit: totalDeposit,
                 withdraw: totalWithdraw,
-                income: totalIncome
+                income: totalIncome, // Gross Income
+                agentIncome,
+                providerIncome
             },
             // chart,
             startDate: start,

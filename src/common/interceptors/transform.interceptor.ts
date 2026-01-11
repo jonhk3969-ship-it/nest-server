@@ -4,6 +4,7 @@ import {
     ExecutionContext,
     CallHandler,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 
@@ -20,7 +21,14 @@ export class TransformInterceptor<T>
     intercept(
         context: ExecutionContext,
         next: CallHandler,
-    ): Observable<Response<T>> {
+    ): Observable<any> {
+        const reflector = new Reflector();
+        const bypass = reflector.get<boolean>('bypass_transform', context.getHandler());
+
+        if (bypass) {
+            return next.handle();
+        }
+
         return next.handle().pipe(
             map((data) => {
                 const ctx = context.switchToHttp();
@@ -30,6 +38,7 @@ export class TransformInterceptor<T>
                 let status = 'ok';
                 let message = 'Success';
                 let responseData = data;
+                let meta = undefined;
 
                 // Check if data is already partially formatted (from Service)
                 if (data && typeof data === 'object' && !Array.isArray(data)) {
@@ -41,6 +50,9 @@ export class TransformInterceptor<T>
                     // If it does, we assume the service wrapped the result in { status, data, ... }
                     if (data.data !== undefined) {
                         responseData = data.data;
+                        if (data.meta) {
+                            meta = data.meta;
+                        }
                     } else if (data.status && (data.message || data.msg)) {
                         // If we have status/message but NO data property, implies the result IS null/void
                         // e.g. { status: 'ok', message: 'Deleted' }
@@ -55,6 +67,7 @@ export class TransformInterceptor<T>
                     code: statusCode,
                     message: message,
                     data: responseData,
+                    meta: meta,
                 };
             }),
         );
