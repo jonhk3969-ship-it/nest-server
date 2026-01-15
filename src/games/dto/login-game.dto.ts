@@ -19,4 +19,8 @@ export class LoginGameDto {
     @IsArray()
     @IsOptional()
     betLimit?: any[];
+
+    @IsNumber()
+    @IsOptional()
+    limit?: number;
 }

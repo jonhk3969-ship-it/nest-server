@@ -65,9 +65,12 @@ export class GamesService {
             );
         }
     }
-    async login(username: string, productId: string, gameCode: string, isMobileLogin: boolean = true, betLimit: any[] = [], gameName?: string) {
+    async login(username: string, productId: string, gameCode: string, isMobileLogin: boolean = true, betLimit: any[] = [], gameName?: string, limit?: number) {
         const agentUsername = this.configService.get<string>('AGENT_USERNAME');
         const xApiKey = this.configService.get<string>('X_API_KEY');
+
+        // Normalize username (Important for Seamless Wallet consistency)
+        const normalizedUsername = username.toLowerCase();
 
         // Cache gameName mapping if provided
         if (gameName) {
@@ -90,19 +93,23 @@ export class GamesService {
         const auth = Buffer.from(`${agentUsername}:${xApiKey}`).toString('base64');
         const url = `${this.apiUrl}/seamless/logIn`;
 
-        // Generate a simple session token (UUID v4 like) or use timestamp + random
-        // Using crypto.randomUUID() if available (Node 14.17+) or fallback
+        // Generate sessionToken as UUID (matching doc example: "d4be70d1-349f-4fc1-a955-35d2a4bff244")
         const sessionToken = require('crypto').randomUUID();
 
-        const payload = {
-            username: username,
+        // Build payload exactly as per API documentation example
+        const payload: any = {
+            username: normalizedUsername,
             productId: productId,
             gameCode: gameCode,
             isMobileLogin: isMobileLogin,
-            limit: 1000,
             sessionToken: sessionToken,
-            betLimit: betLimit
+            betLimit: betLimit || [], // Always include betLimit (empty array if not provided)
         };
+
+        // Optional: limit - only add if provided
+        if (typeof limit === 'number') {
+            payload.limit = limit;
+        }
 
         try {
             const response = await firstValueFrom(

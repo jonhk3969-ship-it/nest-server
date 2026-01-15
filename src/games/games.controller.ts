@@ -16,7 +16,7 @@ export class GamesController {
     @UseGuards(JwtAuthGuard)
     @Post('login')
     login(@Body() loginGameDto: LoginGameDto, @Req() req) {
-        return this.gamesService.login(req.user.username, loginGameDto.productId, loginGameDto.gameCode, loginGameDto.isMobileLogin, loginGameDto.betLimit, loginGameDto.gameName);
+        return this.gamesService.login(req.user.username, loginGameDto.productId, loginGameDto.gameCode, loginGameDto.isMobileLogin, loginGameDto.betLimit, loginGameDto.gameName, loginGameDto.limit);
     }
     @UseGuards(JwtAuthGuard)
     @Get('transactions')

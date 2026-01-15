@@ -70,7 +70,7 @@ export class UsersService {
         const timestamp = new Date().toISOString();
 
         for (let i = 0; i < quantity; i++) {
-            const username = `${agent.nickName}${String(currentSeq).padStart(4, '0')}`;
+            const username = `${agent.nickName.toLowerCase()}${String(currentSeq).padStart(4, '0')}`;
             currentSeq++;
 
             // Generate 5-digit random password
@@ -450,6 +450,16 @@ export class UsersService {
             documents: historyInserts
         });
 
+        // 4. Update Redis Cache
+        for (const user of users) {
+            const after = user.amount + amount;
+            try {
+                await this.redisClient.set(`balance:${user.username.toLowerCase()}`, after);
+            } catch (e) {
+                console.error(`Failed to update Redis balance for ${user.username}`, e);
+            }
+        }
+
         return {
             status: 'ok',
             message: 'ຝາກເງິນສຳເລັດ',
@@ -516,6 +526,13 @@ export class UsersService {
                 }
             ]
         });
+
+        // 4. Update Redis Cache
+        try {
+            await this.redisClient.set(`balance:${user.username.toLowerCase()}`, userAfter);
+        } catch (e) {
+            console.error(`Failed to update Redis balance for ${user.username}`, e);
+        }
 
         return { status: 'ok', message: 'ຖອນເງິນສຳເລັດ' };
     }
