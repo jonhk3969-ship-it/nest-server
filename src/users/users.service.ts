@@ -1,13 +1,18 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { CreateBulkUsersDto } from './dto/create-bulk-users.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import * as bcrypt from 'bcrypt';
+import { REDIS_CLIENT } from '../common/redis/redis.provider';
+import type Redis from 'ioredis';
 
 @Injectable()
 export class UsersService {
-    constructor(private prisma: PrismaService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        @Inject(REDIS_CLIENT) private readonly redisClient: Redis
+    ) { }
 
     async create(createUserDto: CreateUserDto) {
         const hashedPassword = await bcrypt.hash(createUserDto.password, 10);
@@ -232,18 +237,38 @@ export class UsersService {
     }
 
     async getAmount(userId: string) {
+        // First, get username from user to lookup Redis cache
         const user = await this.prisma.user.findUnique({
             where: { id: userId },
-            select: { amount: true }
+            select: { username: true, amount: true }
         });
 
         if (!user) {
             throw new BadRequestException('User not found');
         }
 
+        // IMPORTANT: Use lowercase username for Redis key consistency with SeamlessService
+        const usernameKey = user.username.toLowerCase();
+
+        // Try Redis cache first (sub-millisecond) - updated by Seamless worker
+        const cachedBalance = await this.redisClient.get(`balance:${usernameKey}`);
+
+        // Debug Log
+        console.log(`getAmount: User=${usernameKey}, Redis=${cachedBalance}, DB=${user.amount}`);
+
+        if (cachedBalance !== null) {
+            return {
+                status: 'ok',
+                data: { amount: Number(cachedBalance) }
+            };
+        }
+
+        // Cache miss - return DB value and populate cache
+        await this.redisClient.set(`balance:${usernameKey}`, user.amount);
+
         return {
             status: 'ok',
-            data: { amount: user.amount }
+            data: { amount: Number(user.amount) }
         };
     }
 
@@ -530,6 +555,31 @@ export class UsersService {
         };
     }
 
+    async getBetTransactions(userId: string, page: number = 1, limit: number = 10) {
+        const pageNumber = Math.max(1, Number(page));
+        const limitNumber = Math.max(1, Number(limit));
+        const skip = (pageNumber - 1) * limitNumber;
+
+        const where: any = { userId };
+
+        const [items, totalItems] = await Promise.all([
+            this.prisma.betTransaction.findMany({
+                where,
+                skip,
+                take: limitNumber,
+                orderBy: { createdAt: 'desc' }
+            }),
+            this.prisma.betTransaction.count({ where })
+        ]);
+
+        return {
+            items,
+            totalItems,
+            currentPage: pageNumber,
+            totalPages: Math.ceil(totalItems / limitNumber)
+        };
+    }
+
     async blockUsers(agentId: string, userIds: string[]) {
         const ids = Array.isArray(userIds) ? userIds : [userIds];
 
@@ -637,6 +687,18 @@ export class UsersService {
             });
         }
 
+        // 8. Update Redis Cache (Force Sync to 0)
+        // CRITICAL FIX: Iterate over ALL targeted users, not just activeUsers.
+        // This ensures that if a user was "already blocked" but had stale Redis balance, they get fixed.
+        for (const user of users) {
+            try {
+                // Force sync balance to 0
+                await this.redisClient.set(`balance:${user.username.toLowerCase()}`, 0);
+            } catch (e) {
+                console.error(`Failed to update Redis for user ${user.username}:`, e);
+            }
+        }
+
         return {
             status: 'ok',
             message: `ບລັອກຜູ້ໃຊ້ ${activeUsers.length} ຄົນສຳເລັດ. ຜູ້ໃຊ້ ${alreadyBlockedCount} ຄົນຖືກບລັອກແລ້ວ.`,
@@ -656,7 +718,7 @@ export class UsersService {
                 id: { in: ids },
                 agentId: agentId
             },
-            select: { id: true }
+            select: { id: true, username: true, amount: true }
         });
 
         if (users.length === 0) {
@@ -667,10 +729,20 @@ export class UsersService {
         const userUpdates: any[] = [];
 
         for (const user of users) {
+            // 1. Update DB Status
             userUpdates.push({
                 q: { _id: { $oid: user.id } },
                 u: { $set: { status: true, updatedAt: { $date: timestamp } } }
             });
+
+            // 2. Sync Redis Cache (Force Update)
+            try {
+                // Eagerly set the correct balance from DB
+                const balance = Number(user.amount);
+                await this.redisClient.set(`balance:${user.username.toLowerCase()}`, balance);
+            } catch (e) {
+                console.error(`Failed to update Redis for user ${user.username}:`, e);
+            }
         }
 
         await this.prisma.$runCommandRaw({

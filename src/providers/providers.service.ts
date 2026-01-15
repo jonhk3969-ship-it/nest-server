@@ -67,7 +67,9 @@ export class ProvidersService {
     }
 
     async findAllPublic(category?: string) {
-        const where: Prisma.ProviderWhereInput = {};
+        const where: Prisma.ProviderWhereInput = {
+            status: true, // Chỉ lấy provider có status = true
+        };
 
         if (category) {
             where.category = category as CategoryCode;

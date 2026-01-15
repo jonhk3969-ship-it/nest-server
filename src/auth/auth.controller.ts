@@ -14,7 +14,7 @@ export class AuthController {
     async userLogin(@Body() loginDto: LoginDto, @Ip() ip: string) {
         const user = await this.authService.validateUserClient(loginDto.username, loginDto.password);
         if (!user) {
-            throw new UnauthorizedException('ຂໍ້ມູນບໍ່ຖືກຕ້ອງ');
+            throw new UnauthorizedException('ข้อมูลไม่ถูกต้อง');
         }
         return this.authService.login(user, ip);
     }

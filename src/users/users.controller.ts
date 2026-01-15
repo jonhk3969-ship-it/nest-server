@@ -134,6 +134,25 @@ export class UsersController {
 
         return this.usersService.getHistory(id, Number(page), Number(limit), startDate, endDate);
     }
+
+    @Roles('admin', 'agent', 'user')
+    @Get(':id/bet-transactions')
+    async getBetTransactions(
+        @Param('id') id: string,
+        @Req() req,
+        @Query('page') page: number = 1,
+        @Query('limit') limit: number = 10,
+    ) {
+        const userResp = await this.usersService.findOne(id);
+        const user = userResp.data;
+        if (!user) throw new UnauthorizedException('User not found');
+
+        // Authorization check
+        if (req.user.role === 'user' && req.user.userId !== id) throw new UnauthorizedException();
+        if (req.user.role === 'agent' && user.agentId !== req.user.userId) throw new UnauthorizedException();
+
+        return this.usersService.getBetTransactions(id, Number(page), Number(limit));
+    }
     @Roles('agent')
     @Post('block')
     block(@Body('userIds') userIds: string[], @Req() req) {

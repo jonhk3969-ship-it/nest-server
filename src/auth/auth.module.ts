@@ -7,14 +7,24 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtStrategy } from './jwt.strategy';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SystemModule } from '../system/system.module';
-
-import { RedisModule } from '../common/redis/redis.module';
+import { CacheModule } from '@nestjs/cache-manager';
+import { redisStore } from 'cache-manager-ioredis-yet';
 
 @Module({
   imports: [
     PrismaModule,
     PassportModule,
-    RedisModule, // Import Global Redis Module
+    CacheModule.registerAsync({
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => ({
+        store: redisStore,
+        host: configService.get('REDIS_HOST') || 'localhost',
+        port: parseInt(configService.get('REDIS_PORT') || '6379'),
+        password: configService.get('REDIS_PASSWORD') || undefined,
+        ttl: 3600, // 1 hour default TTL
+      }),
+      inject: [ConfigService],
+    }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => {
@@ -24,7 +34,7 @@ import { RedisModule } from '../common/redis/redis.module';
         }
         return {
           secret,
-          signOptions: { expiresIn: '60m' }, // Access token lasts 60m per requirement
+          signOptions: { expiresIn: '60m' },
         };
       },
       inject: [ConfigService],
@@ -33,6 +43,7 @@ import { RedisModule } from '../common/redis/redis.module';
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],
-  exports: [AuthService],
+  exports: [AuthService, CacheModule],
 })
 export class AuthModule { }
+

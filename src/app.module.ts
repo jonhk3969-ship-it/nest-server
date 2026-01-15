@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ThrottlerLaoGuard } from './throttler-lao.guard';
@@ -18,14 +19,27 @@ import { GamesModule } from './games/games.module';
 import { SeamlessModule } from './seamless/seamless.module';
 import { ProvidersModule } from './providers/providers.module';
 import { BannersModule } from './banners/banners.module';
+import { RedisModule } from './common/redis/redis.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => ({
+        connection: {
+          host: configService.get('REDIS_HOST') || 'localhost',
+          port: parseInt(configService.get('REDIS_PORT') || '6379'),
+          password: configService.get('REDIS_PASSWORD') || undefined,
+        },
+      }),
+      inject: [ConfigService],
+    }),
     ThrottlerModule.forRoot([{
       ttl: 60,
-      limit: 10,
+      limit: 10000000, // Increased for Load Test
     }]),
+    RedisModule,
     AuthModule,
     UsersModule,
     AgentsModule,

@@ -23,8 +23,15 @@ enum TransactionType {
   ROLLBACK
 }
 
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
 model Admin {
-  id        String   @id @map("_id") @default(auto()) @db.ObjectId
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
   username  String   @unique
   password  String
   role      Role     @default(ADMIN)
@@ -35,43 +42,46 @@ model Admin {
 }
 
 model Agent {
-  id          String        @id @map("_id") @default(auto()) @db.ObjectId
-  username    String        @unique
-  nickName    String?       @unique
-  password    String
+  id           String         @id @default(auto()) @map("_id") @db.ObjectId
+  username     String         @unique
+  nickName     String?        @unique
+  password     String
   showpassword String?
-  agentname   String?
-  amount      Float         @default(0.0)
-  role        Role          @default(AGENT)
-  percent     Float
-  maxNumUser  Int           @default(50)
-  status      Boolean       @default(true)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  users       User[]
-  history     AgentHistory[]
-  userHistory UserHistory[]
+  agentname    String?
+  amount       Float          @default(0)
+  role         Role           @default(AGENT)
+  percent      Float
+  maxNumUser   Int            @default(50)
+  status       Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  users        User[]
+  history      AgentHistory[]
+  userHistory  UserHistory[]
 
   @@index([status])
 }
 
 model User {
-  id        String        @id @map("_id") @default(auto()) @db.ObjectId
-  username  String        @unique
-  password  String
-  showpassword String?
-  amount    Float         @default(0.0)
-  spin      Int           @default(0)
-  role      Role          @default(USER)
-  agentId   String        @db.ObjectId
-  agent     Agent         @relation(fields: [agentId], references: [id])
-  delete    Boolean       @default(false)
-  status    Boolean       @default(true)
-  isOnline  Boolean       @default(false)
-  ip        String?
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
-  history   UserHistory[]
+  id              String           @id @default(auto()) @map("_id") @db.ObjectId
+  username        String           @unique
+  password        String
+  showpassword    String?
+  amount          Float            @default(0)
+  spin            Int              @default(0)
+  betAmount       Float            @default(0)
+  payoutAmount    Float            @default(0)
+  netAmount       Float            @default(0) // Payout - Bet (Profit/Loss)
+  role            Role             @default(USER)
+  agentId         String           @db.ObjectId
+  agent           Agent            @relation(fields: [agentId], references: [id])
+  delete          Boolean          @default(false)
+  status          Boolean          @default(true)
+  isOnline        Boolean          @default(false)
+  ip              String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  history         UserHistory[]
   betTransactions BetTransaction[]
 
   @@index([agentId])
@@ -79,7 +89,7 @@ model User {
 }
 
 model AgentHistory {
-  id            String          @id @map("_id") @default(auto()) @db.ObjectId
+  id            String          @id @default(auto()) @map("_id") @db.ObjectId
   agentId       String          @db.ObjectId
   agent         Agent           @relation(fields: [agentId], references: [id])
   amount        Float
@@ -91,7 +101,7 @@ model AgentHistory {
 }
 
 model UserHistory {
-  id            String          @id @map("_id") @default(auto()) @db.ObjectId
+  id            String          @id @default(auto()) @map("_id") @db.ObjectId
   userId        String          @db.ObjectId
   user          User?           @relation(fields: [userId], references: [id])
   agentId       String          @db.ObjectId
@@ -100,58 +110,60 @@ model UserHistory {
   before_amount Float
   after_amount  Float
   type          TransactionType
-  transactionId String?         @unique
   date          DateTime?       @default(now())
   status        Boolean         @default(true)
 }
 
 model BetTransaction {
-  id            String          @id @map("_id") @default(auto()) @db.ObjectId
-  userId        String          @db.ObjectId
-  user          User?           @relation(fields: [userId], references: [id])
-  username      String
-  agentId       String          @db.ObjectId
-  productId     String
-  gameCode      String
-  type          TransactionType // BET, SETTLE, etc.
-  
+  id        String          @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String          @db.ObjectId
+  user      User?           @relation(fields: [userId], references: [id])
+  username  String
+  agentId   String          @db.ObjectId
+  productId String
+  gameCode  String
+  type      TransactionType // BET, SETTLE, etc.
+
   // Amounts
-  betAmount     Float           @default(0)
-  payoutAmount  Float           @default(0)
-  netAmount     Float           @default(0) // Payout - Bet (Profit/Loss)
+  betAmount     Float @default(0)
+  payoutAmount  Float @default(0)
+  netAmount     Float @default(0) // Payout - Bet (Profit/Loss)
+  balanceBefore Float @default(0) // User balance before transaction
+  balanceAfter  Float @default(0) // User balance after transaction
 
   // Identifiers
-  transactionId String          @unique // Provider's specific Txn ID
-  roundId       String?         // Provider's Round ID
-  betId         String?         // For linking Settle back to Bet (if needed)
+  transactionId String  @unique // Provider's specific Txn ID
+  roundId       String? // Provider's Round ID
+  betId         String? // For linking Settle back to Bet (if needed)
 
   // Status
-  status        String          // PENDING, SETTLED, CANCELLED, ROLLEDBACK
-  playInfo      String?         // Extra info provided by game
-  
-  // Timestamps
-  transactionTime DateTime 
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
+  status   TransactionStatus @default(PENDING)
+  playInfo String? // Extra info provided by game
+  gameName String? // Game Name from Login
 
-  @@index([username])
-  @@index([agentId])
+  // Timestamps
+  transactionTime DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
   // transactionId is already @unique, so index is redundant but harmless usually. 
   // However, error said "Index already exists". @unique creates an index.
   // So we remove explicit @@index([transactionId]) to be safe.
-  
+
+  @@index([username])
+  @@index([agentId])
   @@index([roundId])
   @@index([createdAt])
+  @@index([status])
 }
 
 model SystemConfig {
-  id          String   @id @map("_id") @default(auto()) @db.ObjectId
-  isMaintenanceMode Boolean @default(false)
-  updatedAt   DateTime @updatedAt
+  id                String   @id @default(auto()) @map("_id") @db.ObjectId
+  isMaintenanceMode Boolean  @default(false)
+  updatedAt         DateTime @updatedAt
 }
 
 model Post {
-  id          String   @id @map("_id") @default(auto()) @db.ObjectId
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
   title       String
   description String
   createdAt   DateTime @default(now())
@@ -166,32 +178,32 @@ enum CategoryCode {
 }
 
 model Provider {
-  id           String         @id @default(auto()) @map("_id") @db.ObjectId
+  id String @id @default(auto()) @map("_id") @db.ObjectId
 
-  productId    String         @unique                 // REDTIGER, AFB1188
-  productName  String                                  // Red Tiger Gaming
-  img          String                                  // provider logo (URL)
+  productId   String @unique // REDTIGER, AFB1188
+  productName String // Red Tiger Gaming
+  img         String // provider logo (URL)
 
-  status       Boolean        @default(true)
-  category     CategoryCode                            // chỉ 1 category
-  rank         Int            @default(0)
+  status   Boolean      @default(true)
+  category CategoryCode // chỉ 1 category
+  rank     Int          @default(0)
 
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([category])
 }
 
 model Banner {
-  id           String         @id @default(auto()) @map("_id") @db.ObjectId
+  id String @id @default(auto()) @map("_id") @db.ObjectId
 
-  bannerName   String
-  img          String         // banner image (URL)
-  status       Boolean        @default(true)
+  bannerName String
+  img        String // banner image (URL)
+  status     Boolean @default(true)
 
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([status])
 }

@@ -1,6 +1,7 @@
 
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TransactionStatus } from '@prisma/client';
 import { CheckBalanceDto } from './dto/check-balance.dto';
 import { PlaceBetDto } from './dto/place-bet.dto';
 import { SettleBetDto } from './dto/settle-bet.dto';
@@ -8,14 +9,43 @@ import { CancelBetDto } from './dto/cancel-bet.dto';
 import { CancelTipDto } from './dto/cancel-tip.dto';
 import { RollbackDto } from './dto/rollback.dto';
 
+import { SeamlessProducer } from './queue/seamless.producer';
+import { REDIS_CLIENT } from '../common/redis/redis.provider';
+import type Redis from 'ioredis';
+
 @Injectable()
 export class SeamlessService {
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly seamlessProducer: SeamlessProducer,
+        @Inject(REDIS_CLIENT) private readonly redisClient: Redis
+    ) { }
 
     async checkBalance(dto: CheckBalanceDto) {
         try {
+            const username = dto.username.toLowerCase();
+            // OPTIMIZATION: Try Redis cache first (sub-millisecond)
+            const cachedBalance = await this.redisClient.get(`balance:${username}`);
+
+            if (cachedBalance !== null) {
+                // Cache HIT - Return immediately without DB query
+                return {
+                    id: dto.id,
+                    statusCode: 0,
+                    groupId: '',
+                    timestampMillis: Date.now(),
+                    productId: dto.productId,
+                    currency: dto.currency,
+                    balance: Number(cachedBalance),
+                    username: dto.username, // Returning original username as per some providers' requirements? Or strict? 
+                    // Ideally return what they sent or what we found? 
+                    // Let's keep returning dto.username to be safe, but use normalized for lookup.
+                };
+            }
+
+            // Cache MISS - Fallback to DB (user might not have played yet)
             const user = await this.prisma.user.findUnique({
-                where: { username: dto.username },
+                where: { username: username },
             });
 
             if (!user) {
@@ -27,6 +57,9 @@ export class SeamlessService {
                 };
             }
 
+            // Populate cache for next time
+            await this.redisClient.set(`balance:${username}`, user.amount);
+
             return {
                 id: dto.id,
                 statusCode: 0, // Success
@@ -34,7 +67,7 @@ export class SeamlessService {
                 timestampMillis: Date.now(),
                 productId: dto.productId,
                 currency: dto.currency,
-                balance: user.amount,
+                balance: Number(user.amount),
                 username: dto.username,
             };
         } catch (error) {
@@ -50,6 +83,9 @@ export class SeamlessService {
 
     async placeBets(dto: PlaceBetDto) {
         try {
+            // Normalize username
+            dto.username = dto.username.toLowerCase();
+
             const user = await this.prisma.user.findUnique({
                 where: { username: dto.username },
             });
@@ -64,63 +100,44 @@ export class SeamlessService {
             }
 
             let totalBet = 0;
-            dto.txns.forEach(txn => totalBet += txn.betAmount);
+            for (const t of dto.txns) {
+                totalBet += t.betAmount;
+            }
 
-            if (user.amount < totalBet) {
+            // Enrich DTO for Worker (Important!)
+            (dto as any).userId = user.id;
+            (dto as any).agentId = user.agentId;
+
+            // Fast Path Execution
+            let res = await this.seamlessProducer.executeFastBet(dto, totalBet, dto.id);
+
+            // Lazy Load Balance to Redis if missing
+            if (res.status === 'MISSING_BAL') {
+                await this.seamlessProducer.setRedisBalance(user.username, user.amount);
+                // Retry once
+                res = await this.seamlessProducer.executeFastBet(dto, totalBet, dto.id);
+            }
+
+            if (res.status === 'INSUFFICIENT' || (res.status === 'MISSING_BAL' && user.amount < totalBet)) {
+                // If specific transaction failure marking is needed, we can't easily do it here without DB write.
+                // But for high-throughput, we prioritize response speed.
+                // We return Insufficient Funds error.
                 return {
                     id: dto.id,
                     statusCode: 10002, // Insufficient balance
                     productId: dto.productId,
                     timestampMillis: Date.now(),
-                    balanceBefore: user.amount,
-                    balanceAfter: user.amount,
+                    balanceBefore: res.balance || user.amount,
+                    balanceAfter: res.balance || user.amount,
                     username: dto.username,
                 };
             }
 
-            const updatedUser = await this.prisma.user.update({
-                where: { username: dto.username },
-                data: {
-                    amount: { decrement: totalBet }
-                }
-            });
-
-            // Execute writes in parallel to reduce latency
-            await Promise.all([
-                // 1. Balance Flow (Audit)
-                this.prisma.userHistory.createMany({
-                    data: dto.txns.map(txn => ({
-                        userId: user.id,
-                        agentId: user.agentId,
-                        amount: txn.betAmount,
-                        before_amount: user.amount,
-                        after_amount: updatedUser.amount,
-                        type: 'BET' as any,
-                        transactionId: txn.id,
-                        status: true,
-                        date: new Date()
-                    }))
-                }),
-                // 2. Game Detail Flow (Report)
-                this.prisma.betTransaction.createMany({
-                    data: dto.txns.map(txn => ({
-                        userId: user.id,
-                        username: user.username,
-                        agentId: user.agentId,
-                        productId: dto.productId,
-                        gameCode: txn.gameCode,
-                        type: 'BET' as any,
-                        betAmount: txn.betAmount,
-                        payoutAmount: 0,
-                        netAmount: -txn.betAmount,
-                        transactionId: txn.id,
-                        roundId: txn.roundId,
-                        status: 'PENDING',
-                        playInfo: txn.playInfo,
-                        transactionTime: new Date(dto.timestampMillis)
-                    }))
-                })
-            ]);
+            // Store balance info in DTO for Worker to use (accurate values at time of API call)
+            const balanceBefore = res.balance + totalBet;
+            const balanceAfter = res.balance;
+            (dto as any).balanceBefore = balanceBefore;
+            (dto as any).balanceAfter = balanceAfter;
 
             return {
                 id: dto.id,
@@ -128,13 +145,14 @@ export class SeamlessService {
                 timestampMillis: Date.now(),
                 productId: dto.productId,
                 currency: dto.currency,
-                balanceBefore: user.amount,
-                balanceAfter: updatedUser.amount,
+                balanceBefore: balanceBefore,
+                balanceAfter: balanceAfter,
                 username: dto.username,
             };
 
         } catch (error) {
             console.error('Error in placeBets:', error);
+            // Fallback?
             return {
                 id: dto.id,
                 statusCode: 50001,
@@ -146,6 +164,9 @@ export class SeamlessService {
 
     async settleBets(dto: SettleBetDto) {
         try {
+            // Normalize username
+            dto.username = dto.username.toLowerCase();
+
             const user = await this.prisma.user.findUnique({
                 where: { username: dto.username },
             });
@@ -159,84 +180,38 @@ export class SeamlessService {
                 };
             }
 
-            let totalChange = 0;
-
-            // Calculate total change
+            // Calculate totals from transactions
+            let totalPayout = 0;
+            let totalBet = 0;
             dto.txns.forEach(txn => {
-                let change = txn.payoutAmount;
-                // If single state or specific logic requires deducting betAmount
-                // Usually settle adds payout. If bet was not deducted in placeBets (rare for seamless), we might need to deduct here.
-                // Assuming standard seamless: placeBets deducted, settleBets adds payout.
-                // UNLESS "betAmount" is sent and implies deduction. 
-                // Provider docs say: "If isSingleState... we can't identify betAmount from /placeBets... check player's balance by betAmount first"
-                // So if single state, we should deduct betAmount too?
-
-                // Logic based on docs:
-                // "If betAmount > 0 and payoutAmount > betAmount, the player is win"
-                // "Update user's balance with betAmount or payoutAmount"
-
-                // Let's implement robust logic:
-                // 1. If txn.betAmount > 0, it MIGHT need deduction if NOT already deducted (e.g. Single State)
-                // 2. txn.payoutAmount is ALWAYS added.
-
-                // Simplification for MVP: Always ADD payoutAmount. 
-                // IF isSingleState or no corresponding PlaceBet, we might need to deduct betAmount.
-                // Docs say: "Product Single State ... the round do not start by /placeBets ... sent both betAmount and payoutAmount"
-
-                // Only deduct betAmount if it's strictly a Single State transaction (Bet + Settle in one)
-                if (txn.betAmount > 0 && txn.isSingleState) {
-                    change -= txn.betAmount;
-                }
-
-                totalChange += change;
+                totalPayout += txn.payoutAmount || 0;
+                totalBet += txn.betAmount || 0;
             });
 
-            // Check balance for deduction (if net negative or large bet in single state)
-            // Ideally we check deduction separately.
+            // Enrich DTO
+            (dto as any).userId = user.id;
+            (dto as any).agentId = user.agentId;
 
-            const updatedUser = await this.prisma.user.update({
-                where: { username: dto.username },
-                data: {
-                    amount: { increment: totalChange }
-                }
-            });
+            // Fast Path Settle
+            // Pass both totalBet and totalPayout to handle combined mode (PGSOFT)
+            // Net change = payoutAmount - betAmount (works for both ROYAL and PGSOFT)
+            let res = await this.seamlessProducer.executeFastSettle(dto, totalBet, totalPayout, dto.id);
 
-            // Execute writes in parallel
-            await Promise.all([
-                // 1. Balance Flow
-                this.prisma.userHistory.createMany({
-                    data: dto.txns.map(txn => ({
-                        userId: user.id,
-                        agentId: user.agentId,
-                        amount: txn.payoutAmount,
-                        before_amount: user.amount,
-                        after_amount: updatedUser.amount,
-                        type: 'SETTLE' as any,
-                        transactionId: txn.id,
-                        status: true,
-                        date: new Date()
-                    }))
-                }),
-                // 2. Game Detail Flow
-                this.prisma.betTransaction.createMany({
-                    data: dto.txns.map(txn => ({
-                        userId: user.id,
-                        username: user.username,
-                        agentId: user.agentId,
-                        productId: dto.productId,
-                        gameCode: txn.gameCode,
-                        type: 'SETTLE' as any,
-                        betAmount: txn.betAmount,
-                        payoutAmount: txn.payoutAmount,
-                        netAmount: txn.payoutAmount - txn.betAmount,
-                        transactionId: txn.id,
-                        roundId: txn.roundId,
-                        status: 'SETTLED',
-                        playInfo: txn.playInfo,
-                        transactionTime: new Date(dto.timestampMillis)
-                    }))
-                })
-            ]);
+            // Lazy Load Balance
+            if (res.status === 'MISSING_BAL') {
+                await this.seamlessProducer.setRedisBalance(user.username, user.amount);
+                res = await this.seamlessProducer.executeFastSettle(dto, totalBet, totalPayout, dto.id);
+            }
+
+            // Calculate balance before/after for accurate record keeping
+            // net = payoutAmount - betAmount was applied to get res.balance
+            const netChange = totalPayout - totalBet;
+            const balanceBefore = res.balance - netChange; // Balance before this settle
+            const balanceAfter = res.balance; // Current balance after settle
+
+            // Store in DTO for Worker to use
+            (dto as any).balanceBefore = balanceBefore;
+            (dto as any).balanceAfter = balanceAfter;
 
             return {
                 id: dto.id,
@@ -245,8 +220,8 @@ export class SeamlessService {
                 timestampMillis: Date.now(),
                 username: dto.username,
                 currency: dto.currency,
-                balanceBefore: user.amount,
-                balanceAfter: updatedUser.amount
+                balanceBefore: balanceBefore,
+                balanceAfter: balanceAfter
             };
 
         } catch (error) {
@@ -262,6 +237,7 @@ export class SeamlessService {
 
     async cancelBets(dto: CancelBetDto) {
         try {
+            dto.username = dto.username.toLowerCase();
             const user = await this.prisma.user.findUnique({ where: { username: dto.username } });
             if (!user) return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
 
@@ -270,8 +246,9 @@ export class SeamlessService {
 
             for (const txn of dto.txns) {
                 // Idempotency Check
-                const exists = await this.prisma.userHistory.findFirst({
-                    where: { transactionId: txn.id, type: 'CANCEL' as any }
+                // Idempotency Check
+                const exists = await this.prisma.betTransaction.findUnique({
+                    where: { transactionId: txn.id }
                 });
 
                 if (!exists) {
@@ -284,30 +261,25 @@ export class SeamlessService {
 
             let updatedUser = user;
             if (totalRefund > 0) {
-                updatedUser = await this.prisma.user.update({
-                    where: { username: dto.username },
-                    data: { amount: { increment: totalRefund } }
+                updatedUser = await this.prisma.$transaction(async (tx) => {
+                    const u = await tx.user.update({
+                        where: { username: dto.username },
+                        data: { amount: { increment: totalRefund } }
+                    });
+
+                    return u;
                 });
 
-                await this.prisma.userHistory.createMany({
-                    data: validTxns.map(txn => ({
-                        userId: user.id,
-                        agentId: user.agentId,
-                        amount: txn.betAmount,
-                        before_amount: user.amount, // Approximate
-                        after_amount: updatedUser.amount,
-                        type: 'CANCEL' as any,
-                        transactionId: txn.id,
-                        roundId: txn.roundId,
-                        status: true,
-                        date: new Date()
-                    }))
-                });
+                // Sync Redis cache with new balance
+                try {
+                    await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+                } catch (e) { /* Redis down, ignore */ }
             }
 
             return {
                 id: dto.id,
-                statusCode: 0,
+                statusCode: 0, // Success
+                groupId: '', // Optional
                 timestampMillis: Date.now(),
                 productId: dto.productId,
                 currency: dto.currency,
@@ -323,6 +295,7 @@ export class SeamlessService {
 
     async rollback(dto: RollbackDto) {
         try {
+            dto.username = dto.username.toLowerCase();
             const user = await this.prisma.user.findUnique({ where: { username: dto.username } });
             if (!user) return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
 
@@ -331,8 +304,9 @@ export class SeamlessService {
 
             for (const txn of dto.txns) {
                 // Idempotency Check
-                const exists = await this.prisma.userHistory.findFirst({
-                    where: { transactionId: txn.id, type: 'ROLLBACK' as any }
+                // Idempotency Check
+                const exists = await this.prisma.betTransaction.findUnique({
+                    where: { transactionId: txn.id }
                 });
 
                 if (!exists) {
@@ -352,25 +326,19 @@ export class SeamlessService {
 
             let updatedUser = user;
             if (totalDeduct > 0) {
-                updatedUser = await this.prisma.user.update({
-                    where: { username: dto.username },
-                    data: { amount: { decrement: totalDeduct } }
+                updatedUser = await this.prisma.$transaction(async (tx) => {
+                    const u = await tx.user.update({
+                        where: { username: dto.username },
+                        data: { amount: { decrement: totalDeduct } }
+                    });
+
+                    return u;
                 });
 
-                await this.prisma.userHistory.createMany({
-                    data: validTxns.map(txn => ({
-                        userId: user.id,
-                        agentId: user.agentId,
-                        amount: -txn.deductAmount, // Negative to show deduction
-                        before_amount: user.amount,
-                        after_amount: updatedUser.amount,
-                        type: 'ROLLBACK' as any,
-                        transactionId: txn.id,
-                        roundId: txn.roundId,
-                        status: true,
-                        date: new Date()
-                    }))
-                });
+                // Sync Redis cache with new balance
+                try {
+                    await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+                } catch (e) { /* Redis down, ignore */ }
             }
 
             return {
@@ -391,6 +359,7 @@ export class SeamlessService {
 
     async cancelTips(dto: CancelTipDto) {
         try {
+            dto.username = dto.username.toLowerCase();
             const user = await this.prisma.user.findUnique({ where: { username: dto.username } });
             if (!user) return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
 
@@ -399,8 +368,9 @@ export class SeamlessService {
 
             for (const txn of dto.txns) {
                 // Idempotency check 
-                const exists = await this.prisma.userHistory.findFirst({
-                    where: { transactionId: txn.id, type: 'CANCEL' as any } // Treating cancelTip as CANCEL type
+                // Idempotency check 
+                const exists = await this.prisma.betTransaction.findUnique({
+                    where: { transactionId: txn.id }
                 });
 
                 if (!exists && txn.betAmount > 0) {
@@ -411,25 +381,19 @@ export class SeamlessService {
 
             let updatedUser = user;
             if (totalRefund > 0) {
-                updatedUser = await this.prisma.user.update({
-                    where: { username: dto.username },
-                    data: { amount: { increment: totalRefund } }
+                updatedUser = await this.prisma.$transaction(async (tx) => {
+                    const u = await tx.user.update({
+                        where: { username: dto.username },
+                        data: { amount: { increment: totalRefund } }
+                    });
+
+                    return u;
                 });
 
-                await this.prisma.userHistory.createMany({
-                    data: validTxns.map(txn => ({
-                        userId: user.id,
-                        agentId: user.agentId,
-                        amount: txn.betAmount,
-                        before_amount: user.amount,
-                        after_amount: updatedUser.amount,
-                        type: 'CANCEL' as any,
-                        transactionId: txn.id,
-                        roundId: txn.roundId,
-                        status: true,
-                        date: new Date()
-                    }))
-                });
+                // Sync Redis cache with new balance
+                try {
+                    await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+                } catch (e) { /* Redis down, ignore */ }
             }
 
             return {
@@ -445,6 +409,264 @@ export class SeamlessService {
 
         } catch (error) {
             console.error('Error in cancelTips:', error);
+            return { id: dto.id, statusCode: 50001, productId: dto.productId, timestampMillis: Date.now() };
+        }
+    }
+
+    // ================= NEW APIS =================
+
+    async adjustBets(dto: any) {
+        try {
+            dto.username = dto.username.toLowerCase();
+
+            const user = await this.prisma.user.findUnique({
+                where: { username: dto.username },
+            });
+
+            if (!user) {
+                return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
+            }
+
+            // Calculate total adjustment amount
+            let totalAdjust = 0;
+            for (const txn of dto.txns) {
+                totalAdjust += txn.betAmount || 0;
+            }
+
+            // Adjust = deduct the new bet amount (the difference is handled by provider)
+            const balanceBefore = user.amount;
+            const updatedUser = await this.prisma.user.update({
+                where: { id: user.id },
+                data: { amount: { decrement: totalAdjust } }
+            });
+
+            // Sync Redis
+            try {
+                await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+            } catch (e) { /* ignore */ }
+
+            return {
+                id: dto.id,
+                statusCode: 0,
+                timestampMillis: Date.now(),
+                productId: dto.productId,
+                currency: dto.currency,
+                balanceBefore: balanceBefore,
+                balanceAfter: updatedUser.amount,
+                username: dto.username,
+            };
+
+        } catch (error) {
+            console.error('Error in adjustBets:', error);
+            return { id: dto.id, statusCode: 50001, productId: dto.productId, timestampMillis: Date.now() };
+        }
+    }
+
+    async winRewards(dto: any) {
+        try {
+            dto.username = dto.username.toLowerCase();
+
+            const user = await this.prisma.user.findUnique({
+                where: { username: dto.username },
+            });
+
+            if (!user) {
+                return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
+            }
+
+            // Calculate total payout
+            let totalPayout = 0;
+            for (const txn of dto.txns) {
+                totalPayout += txn.payoutAmount || 0;
+            }
+
+            const balanceBefore = user.amount;
+            const updatedUser = await this.prisma.user.update({
+                where: { id: user.id },
+                data: { amount: { increment: totalPayout } }
+            });
+
+            // Sync Redis
+            try {
+                await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+            } catch (e) { /* ignore */ }
+
+            return {
+                id: dto.id,
+                statusCode: 0,
+                timestampMillis: Date.now(),
+                productId: dto.productId,
+                currency: dto.currency,
+                balanceBefore: balanceBefore,
+                balanceAfter: updatedUser.amount,
+                username: dto.username,
+            };
+
+        } catch (error) {
+            console.error('Error in winRewards:', error);
+            return { id: dto.id, statusCode: 50001, productId: dto.productId, timestampMillis: Date.now() };
+        }
+    }
+
+    async placeTips(dto: any) {
+        try {
+            dto.username = dto.username.toLowerCase();
+
+            const user = await this.prisma.user.findUnique({
+                where: { username: dto.username },
+            });
+
+            if (!user) {
+                return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
+            }
+
+            // Calculate total tip amount
+            let totalTip = 0;
+            for (const txn of dto.txns) {
+                totalTip += txn.betAmount || 0;
+            }
+
+            // Check balance
+            if (user.amount < totalTip) {
+                return {
+                    id: dto.id,
+                    statusCode: 10002,
+                    productId: dto.productId,
+                    timestampMillis: Date.now(),
+                };
+            }
+
+            const balanceBefore = user.amount;
+            const updatedUser = await this.prisma.user.update({
+                where: { id: user.id },
+                data: { amount: { decrement: totalTip } }
+            });
+
+            // Sync Redis
+            try {
+                await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+            } catch (e) { /* ignore */ }
+
+            return {
+                id: dto.id,
+                statusCode: 0,
+                timestampMillis: Date.now(),
+                productId: dto.productId,
+                currency: dto.currency,
+                balanceBefore: balanceBefore,
+                balanceAfter: updatedUser.amount,
+                username: dto.username,
+            };
+
+        } catch (error) {
+            console.error('Error in placeTips:', error);
+            return { id: dto.id, statusCode: 50001, productId: dto.productId, timestampMillis: Date.now() };
+        }
+    }
+
+    async voidSettled(dto: any) {
+        try {
+            dto.username = dto.username.toLowerCase();
+
+            const user = await this.prisma.user.findUnique({
+                where: { username: dto.username },
+            });
+
+            if (!user) {
+                return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
+            }
+
+            // Void: balance + (betAmount - payoutAmount)
+            // This reverses the original settle
+            let totalChange = 0;
+            for (const txn of dto.txns) {
+                totalChange += (txn.betAmount || 0) - (txn.payoutAmount || 0);
+            }
+
+            const balanceBefore = user.amount;
+            const updatedUser = await this.prisma.user.update({
+                where: { id: user.id },
+                data: { amount: { increment: totalChange } }
+            });
+
+            // Sync Redis
+            try {
+                await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+            } catch (e) { /* ignore */ }
+
+            return {
+                id: dto.id,
+                statusCode: 0,
+                timestampMillis: Date.now(),
+                productId: dto.productId,
+                currency: dto.currency,
+                balanceBefore: balanceBefore,
+                balanceAfter: updatedUser.amount,
+                username: dto.username,
+            };
+
+        } catch (error) {
+            console.error('Error in voidSettled:', error);
+            return { id: dto.id, statusCode: 50001, productId: dto.productId, timestampMillis: Date.now() };
+        }
+    }
+
+    async adjustBalance(dto: any) {
+        try {
+            dto.username = dto.username.toLowerCase();
+
+            const user = await this.prisma.user.findUnique({
+                where: { username: dto.username },
+            });
+
+            if (!user) {
+                return { id: dto.id, statusCode: 10001, productId: dto.productId, timestampMillis: Date.now() };
+            }
+
+            // Calculate total change based on DEBIT/CREDIT
+            let totalChange = 0;
+            for (const txn of dto.txns) {
+                if (txn.status === 'DEBIT') {
+                    totalChange -= txn.amount || 0;
+                } else if (txn.status === 'CREDIT') {
+                    totalChange += txn.amount || 0;
+                }
+            }
+
+            // Check balance for DEBIT
+            if (totalChange < 0 && user.amount < Math.abs(totalChange)) {
+                return {
+                    id: dto.id,
+                    statusCode: 10002,
+                    productId: dto.productId,
+                    timestampMillis: Date.now(),
+                };
+            }
+
+            const balanceBefore = user.amount;
+            const updatedUser = await this.prisma.user.update({
+                where: { id: user.id },
+                data: { amount: { increment: totalChange } }
+            });
+
+            // Sync Redis
+            try {
+                await this.redisClient.set(`balance:${dto.username}`, updatedUser.amount);
+            } catch (e) { /* ignore */ }
+
+            return {
+                id: dto.id,
+                statusCode: 0,
+                timestampMillis: Date.now(),
+                productId: dto.productId,
+                currency: dto.currency,
+                balanceBefore: balanceBefore,
+                balanceAfter: updatedUser.amount,
+                username: dto.username,
+            };
+
+        } catch (error) {
+            console.error('Error in adjustBalance:', error);
             return { id: dto.id, statusCode: 50001, productId: dto.productId, timestampMillis: Date.now() };
         }
     }

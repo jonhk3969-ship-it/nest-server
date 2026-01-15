@@ -44,7 +44,7 @@ export class AgentsService {
             showpassword: password,
             role: 'AGENT',
             status: true,
-            amount: 0.0,
+            amount: 0,
             maxNumUser: createAgentDto.maxNumUser ?? 50,
             createdAt: { $date: new Date().toISOString() },
             updatedAt: { $date: new Date().toISOString() },
@@ -158,6 +158,9 @@ export class AgentsService {
 
         const updates: any = { ...updateAgentDto };
 
+        // SECURITY: Prevent non-atomic balance updates
+        delete updates.amount;
+
         if (updateAgentDto.password) {
             updates.showpassword = updateAgentDto.password;
             updates.password = await bcrypt.hash(updateAgentDto.password, 10);
@@ -224,32 +227,28 @@ export class AgentsService {
         const agent = await this.findOne(id);
         if (!agent) throw new BadRequestException('Agent not found');
 
-        const before = agent.amount;
-
-        const after = before + amount;
-
+        // Atomic Update
         await this.prisma.$runCommandRaw({
             update: 'Agent',
             updates: [
                 {
                     q: { _id: { $oid: id } },
                     u: {
-                        $set: {
-                            amount: after,
-                            updatedAt: { $date: new Date().toISOString() }
-                        }
+                        $inc: { amount: amount },
+                        $set: { updatedAt: { $date: new Date().toISOString() } }
                     }
                 }
             ]
         });
+
         await this.prisma.$runCommandRaw({
             insert: 'AgentHistory',
             documents: [
                 {
                     agentId: { $oid: id },
                     amount: amount,
-                    before_amount: before,
-                    after_amount: after,
+                    before_amount: agent.amount, // Snapshot (Logging only)
+                    after_amount: agent.amount + amount, // Snapshot
                     type: 'DEPOSIT',
                     status: true,
                     date: { $date: new Date().toISOString() }
@@ -257,41 +256,39 @@ export class AgentsService {
             ]
         });
 
-        return { success: true, message: 'Deposit successful (Sequential)' };
+        return { success: true, message: 'Deposit successful (Atomic)' };
     }
 
     async withdraw(id: string, amount: number) {
         const agent = await this.findOne(id);
         if (!agent) throw new BadRequestException('Agent not found');
-        if (agent.amount < amount) throw new BadRequestException('Insufficient funds');
 
-        const before = agent.amount;
-        const after = before - amount;
-
-        // Sequential update to avoid P2031
-        // Use runCommandRaw to bypass P2031 (Transaction requirement) on standalone MongoDB
-        await this.prisma.$runCommandRaw({
+        // Atomic Update with Guard
+        const result: any = await this.prisma.$runCommandRaw({
             update: 'Agent',
             updates: [
                 {
-                    q: { _id: { $oid: id } },
+                    q: { _id: { $oid: id }, amount: { $gte: amount } },
                     u: {
-                        $set: {
-                            amount: after,
-                            updatedAt: { $date: new Date().toISOString() }
-                        }
+                        $inc: { amount: -amount },
+                        $set: { updatedAt: { $date: new Date().toISOString() } }
                     }
                 }
             ]
         });
+
+        if (result.nModified === 0) {
+            throw new BadRequestException('Insufficient funds (Atomic Check)');
+        }
+
         await this.prisma.$runCommandRaw({
             insert: 'AgentHistory',
             documents: [
                 {
                     agentId: { $oid: id },
                     amount: amount,
-                    before_amount: before,
-                    after_amount: after,
+                    before_amount: agent.amount,
+                    after_amount: agent.amount - amount,
                     type: 'WITHDRAW',
                     status: true,
                     date: { $date: new Date().toISOString() }
@@ -299,7 +296,7 @@ export class AgentsService {
             ]
         });
 
-        return { success: true, message: 'Withdraw successful (Sequential)' };
+        return { success: true, message: 'Withdraw successful (Atomic)' };
     }
 
     async getHistory(id: string, page: number = 1, limit: number = 10, startDate?: string, endDate?: string) {
@@ -502,10 +499,11 @@ export class AgentsService {
 
         for (const record of history) {
             globalStats.transactions += 1;
+            const amt = record.amount;
             if (record.type === 'DEPOSIT') {
-                globalStats.deposit += record.amount;
+                globalStats.deposit += amt;
             } else if (record.type === 'WITHDRAW') {
-                globalStats.withdraw += record.amount;
+                globalStats.withdraw += amt;
             }
 
             const agentId = record.agentId;
@@ -513,11 +511,12 @@ export class AgentsService {
 
             const stats = agentStatsMap.get(agentId);
             if (stats) {
+                const amt = record.amount;
                 stats.transactions += 1;
                 if (record.type === 'DEPOSIT') {
-                    stats.deposit += record.amount;
+                    stats.deposit += amt;
                 } else if (record.type === 'WITHDRAW') {
-                    stats.withdraw += record.amount;
+                    stats.withdraw += amt;
                 }
             }
         }

@@ -1,11 +1,13 @@
 
-import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, Inject } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import { AxiosError } from 'axios';
 import * as http from 'http';
 import * as https from 'https';
+import { REDIS_CLIENT } from '../common/redis/redis.provider';
+import type Redis from 'ioredis';
 
 @Injectable()
 export class GamesService {
@@ -14,6 +16,7 @@ export class GamesService {
     constructor(
         private readonly httpService: HttpService,
         private readonly configService: ConfigService,
+        @Inject(REDIS_CLIENT) private readonly redisClient: Redis
     ) {
         const url = this.configService.get<string>('API_URL_GAMES');
         if (!url) {
@@ -62,9 +65,20 @@ export class GamesService {
             );
         }
     }
-    async login(username: string, productId: string, gameCode: string, isMobileLogin: boolean = true, betLimit: any[] = []) {
+    async login(username: string, productId: string, gameCode: string, isMobileLogin: boolean = true, betLimit: any[] = [], gameName?: string) {
         const agentUsername = this.configService.get<string>('AGENT_USERNAME');
         const xApiKey = this.configService.get<string>('X_API_KEY');
+
+        // Cache gameName mapping if provided
+        if (gameName) {
+            try {
+                // Key format: game_name:{productId}:{gameCode}
+                // TTL: 7 days (games don't change names often)
+                await this.redisClient.setex(`game_name:${productId}:${gameCode}`, 604800, gameName);
+            } catch (e) {
+                console.error('Failed to cache gameName', e);
+            }
+        }
 
         if (!agentUsername || !xApiKey) {
             throw new HttpException(

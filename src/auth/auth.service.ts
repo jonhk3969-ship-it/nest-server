@@ -47,7 +47,7 @@ export class AuthService {
         const user: any = await this.prisma.user.findUnique({ where: { username } });
         if (user && await bcrypt.compare(pass, user.password)) {
             if (user.status === false) {
-                throw new UnauthorizedException('ບັນຊີຖືກບລັອກ');
+                throw new UnauthorizedException('บัญชีถูกบล็อก');
             }
             const { password, ...result } = user;
             return result;
@@ -59,7 +59,7 @@ export class AuthService {
         // Check Maintenance Mode
         const systemStatus = await this.systemService.getStatus();
         if (systemStatus.maintenance && user.role !== 'ADMIN') {
-            throw new UnauthorizedException('System is in maintenance mode');
+            throw new UnauthorizedException('ระบบอยู่ในโหมดบำรุงรักษา');
         }
 
         if (user.role === 'USER') {

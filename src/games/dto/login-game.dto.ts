@@ -8,6 +8,10 @@ export class LoginGameDto {
     @IsString()
     gameCode: string;
 
+    @IsString()
+    @IsOptional()
+    gameName?: string;
+
     @IsBoolean()
     @IsOptional()
     isMobileLogin?: boolean;

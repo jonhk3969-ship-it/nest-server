@@ -9,5 +9,6 @@ import { ConfigModule } from '@nestjs/config';
     imports: [HttpModule, ConfigModule],
     controllers: [GamesController],
     providers: [GamesService],
+    exports: [GamesService],
 })
 export class GamesModule { }
